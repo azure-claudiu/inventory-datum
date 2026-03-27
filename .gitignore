@@ -19,3 +19,12 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+.specstory/
+.claude/
+
+# Database files
+*.db
+
+# Do not commit this file:
+snowflake_table_columns.csv
