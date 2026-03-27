@@ -20,6 +20,8 @@ python snowflake_gen.py
 | `snowflake_table_columns.csv` | Schema export from Snowflake — source of truth for all table/column definitions |
 | `snowflake_gen.py` | Reads the CSV, creates `snowflake.db`, and seeds it |
 
+NOTE: The `snowflake_table_columns.csv` is not included in the repo due to its proprietary nature. Please ask the team for access.
+
 ---
 
 ## sap_gen.py
