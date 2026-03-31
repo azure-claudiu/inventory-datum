@@ -23,11 +23,12 @@ import csv
 import os
 import random
 import re
-import pyodbc
+from mssql_python.db_connection import connect
 from collections import OrderedDict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Constants / lookup pools
@@ -436,7 +437,7 @@ class SnowflakeSqlServerGenerator:
                 safe = base
             self._table_map[orig] = safe
 
-        self.conn = pyodbc.connect(connstr)
+        self.conn = connect(self.connstr)
         self.conn.autocommit = False
         self._create_schema()
 
@@ -526,6 +527,8 @@ class SnowflakeSqlServerGenerator:
 
 if __name__ == "__main__":
     csv_file = Path("snowflake_table_columns.csv")
+
+    load_dotenv()
 
     connstr = os.environ.get("AZURE_SQL_CONNSTR")
     if not connstr:
