@@ -11,6 +11,7 @@ pydantic==2.11.1
 
 # Database
 # sqlalchemy==2.0.40
+pyodbc==5.2.0
 
 # Dev / test
 pytest==8.3.5
