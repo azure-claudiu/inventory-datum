@@ -539,6 +539,7 @@ if __name__ == "__main__":
     gen = SnowflakeSqlServerGenerator(
         connstr=connstr,
         schema_csv_path=str(csv_file),
+        schema="snowflake",
         n=50
     )
     gen.seed()
