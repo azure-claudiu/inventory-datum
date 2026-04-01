@@ -122,7 +122,21 @@ def _rand_qty(lo: float = 0.0, hi: float = 1000.0) -> float:
 # ---------------------------------------------------------------------------
 
 def _col_value(col: str, sf_type: str, row_idx: int) -> Any:
-    """Return a plausible value for *col* (Snowflake type *sf_type*)."""
+    """Return a plausible value for *col* (Snowflake type *sf_type*).
+
+    Guarantees a numeric Python value when *sf_type* is a Snowflake numeric
+    type, even when a column-name pattern would otherwise produce a string.
+    """
+    result = _col_value_raw(col, sf_type, row_idx)
+    sft = sf_type.upper()
+    if sft in ("NUMBER", "NUMERIC", "FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION") \
+            and isinstance(result, str):
+        return _rand_amount(0, 10_000)
+    return result
+
+
+def _col_value_raw(col: str, sf_type: str, row_idx: int) -> Any:
+    """Internal implementation — use :func:`_col_value` instead."""
     c   = col.upper()
     cl  = col.lower()
     sft = sf_type.upper()
@@ -455,6 +469,13 @@ class SnowflakeSqlServerGenerator:
 
     def _create_schema(self) -> None:
         cur = self.conn.cursor()
+        cur.execute(f"""
+            IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'{self.schema}')
+            BEGIN
+                EXEC(N'CREATE SCHEMA [{self.schema}]')
+            END
+        """)
+        self.conn.commit()
         for orig, columns in self._schema.items():
             safe = self._table_map[orig]
             col_defs = ",\n            ".join(
