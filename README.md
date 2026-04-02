@@ -115,9 +115,9 @@ Snowflake object names are sanitised for SQLite (e.g. `/SAPLOM/MEH_MM01` → `sa
 ### Usage
 
 ```python
-from snowflake_gen import SnowflakeGenerator
+from snowflake_sqlite_gen import SnowflakeSqliteGenerator
 
-gen = SnowflakeGenerator()   # reads snowflake_table_columns.csv, creates snowflake.db
+gen = SnowflakeSqliteGenerator()   # reads snowflake_table_columns.csv, creates snowflake.db
 gen.seed()                   # inserts 10 rows per table
 gen.close()
 
@@ -125,7 +125,11 @@ print(gen.table_map)         # dict of original Snowflake name -> SQLite table n
 ```
 
 ```bash
-python snowflake_gen.py      # one-shot: creates snowflake.db with N=10
+python snowflake_sqlite_gen.py      # one-shot: creates snowflake.db with N=10
+```
+
+```bash
+python snowflake_sqlserver_gen.py      # one-shot: creates rows in existing SQL Server
 ```
 
 **Parameters**
