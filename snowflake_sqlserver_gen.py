@@ -1,30 +1,34 @@
 """
-SnowflakeGenerator — reads snowflake_table_columns.csv, creates snowflake.db
-(SQLite) with the inferred schema, and seeds it with plausible data.
+SnowflakeSqlServerGenerator — reads snowflake_table_columns.csv, creates tables in a
+SQL Server database (under a configurable schema), and seeds them with plausible data.
 
 Schema is derived dynamically from the CSV so the file is the single source
 of truth — no separate DTOs needed.
 
+The SQL Server connection string is read from the AZURE_SQL_CONNSTR environment variable.
+
 Usage
 -----
-    gen = SnowflakeGenerator()   # creates snowflake.db, builds schema from CSV
-    gen.seed()                   # inserts N=10 rows per table
+    gen = SnowflakeSqlServerGenerator()          # connects, builds schema from CSV
+    gen.seed()                                   # inserts N=10 rows per table
     gen.close()
 
 Or as a one-shot:
-    python snowflake_gen.py
+    python snowflake_gen_sqlserver.py
 """
 
 from __future__ import annotations
 
 import csv
+import os
 import random
 import re
-import sqlite3
+from mssql_python.db_connection import connect
 from collections import OrderedDict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Constants / lookup pools
@@ -74,18 +78,24 @@ _SNAP_IDS   = [f"SNAP{i+1:06d}" for i in range(10)]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sf_to_sqlite(sf_type: str) -> str:
-    """Map a Snowflake column type to the appropriate SQLite affinity."""
+def _sf_to_sqlserver(sf_type: str) -> str:
+    """Map a Snowflake column type to the appropriate SQL Server type."""
     sf = sf_type.upper()
-    if sf in ("NUMBER", "NUMERIC", "INTEGER", "INT", "BIGINT", "SMALLINT",
-              "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL"):
-        return "REAL"
-    # DATE and TIMESTAMP* stored as ISO-8601 TEXT
-    return "TEXT"
+    if sf in ("INTEGER", "INT", "BIGINT"):
+        return "BIGINT"
+    if sf == "SMALLINT":
+        return "SMALLINT"
+    if sf in ("NUMBER", "NUMERIC", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL"):
+        return "FLOAT"
+    if sf == "DATE":
+        return "DATE"
+    if sf.startswith("TIMESTAMP"):
+        return "DATETIME2"
+    return "NVARCHAR(500)"
 
 
 def _sanitise(name: str) -> str:
-    """Convert a Snowflake object name to a valid unquoted SQLite table name."""
+    """Convert a Snowflake object name to a safe identifier (no leading/trailing special chars)."""
     return re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_").lower()
 
 
@@ -112,7 +122,21 @@ def _rand_qty(lo: float = 0.0, hi: float = 1000.0) -> float:
 # ---------------------------------------------------------------------------
 
 def _col_value(col: str, sf_type: str, row_idx: int) -> Any:
-    """Return a plausible value for *col* (Snowflake type *sf_type*)."""
+    """Return a plausible value for *col* (Snowflake type *sf_type*).
+
+    Guarantees a numeric Python value when *sf_type* is a Snowflake numeric
+    type, even when a column-name pattern would otherwise produce a string.
+    """
+    result = _col_value_raw(col, sf_type, row_idx)
+    sft = sf_type.upper()
+    if sft in ("NUMBER", "NUMERIC", "FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION") \
+            and isinstance(result, str):
+        return _rand_amount(0, 10_000)
+    return result
+
+
+def _col_value_raw(col: str, sf_type: str, row_idx: int) -> Any:
+    """Internal implementation — use :func:`_col_value` instead."""
     c   = col.upper()
     cl  = col.lower()
     sft = sf_type.upper()
@@ -275,8 +299,6 @@ def _col_value(col: str, sf_type: str, row_idx: int) -> Any:
         return random.choice(["A", "B", "C", "D"])
     if c in ("ZBSART",):
         return random.choice(_PO_TYPES)
-    if c in ("DISMM", "DISMM"):
-        return random.choice(_MRP_TYPES)
     if c in ("FACTORY_CALENDAR_CD",):
         return random.choice(["01", "US", "DE", "GB"])
     if c in ("SALES_OPER_PLANNING_PLANT_IND",):
@@ -377,40 +399,45 @@ def _parse_schema(csv_path: Path) -> "OrderedDict[str, list[tuple[str,str]]]":
 
 
 # ---------------------------------------------------------------------------
-# SnowflakeGenerator
+# SnowflakeSqlServerGenerator
 # ---------------------------------------------------------------------------
 
-class SnowflakeGenerator:
+class SnowflakeSqlServerGenerator:
     """
-    Reads *snowflake_table_columns.csv* to infer schema, creates *snowflake.db*,
-    and seeds every table with *n* rows of plausible data.
+    Reads *snowflake_table_columns.csv* to infer schema, creates tables in a
+    SQL Server database, and seeds every table with *n* rows of plausible data.
+
+    The SQL Server connection string is read from the ``AZURE_SQL_CONNSTR``
+    environment variable.
 
     Parameters
     ----------
-    db_path    : path to the target SQLite database file
     csv_path   : path to snowflake_table_columns.csv
+    schema     : SQL Server schema name (default: ``dbo``)
     n          : rows to insert per table
     seed       : random seed for reproducibility
     """
 
     def __init__(
         self,
-        db_path: str  = "snowflake.db",
-        csv_path: str = "snowflake_table_columns.csv",
+        connstr: str,
+        schema_csv_path: str = "snowflake_table_columns.csv",
+        schema: str   = "dbo",
         n: int        = 10,
         seed: int     = 42,
     ) -> None:
-        self.db_path  = db_path
-        self.n        = n
+        self.connstr = connstr
+        self.schema = schema
+        self.n      = n
         random.seed(seed)
 
-        csv_file = Path(csv_path)
+        csv_file = Path(schema_csv_path)
         if not csv_file.exists():
             raise FileNotFoundError(f"Schema CSV not found: {csv_file.resolve()}")
 
         self._schema = _parse_schema(csv_file)
 
-        # Build mapping: original name → SQLite-safe name
+        # Build mapping: original name → SQL-Server-safe name.
         # Collision handling: append _2, _3 … if two names sanitise identically.
         seen: dict[str, int] = {}
         self._table_map: dict[str, str] = {}
@@ -424,9 +451,17 @@ class SnowflakeGenerator:
                 safe = base
             self._table_map[orig] = safe
 
-        self.conn = sqlite3.connect(db_path)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = connect(self.connstr)
+        self.conn.autocommit = False
         self._create_schema()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _qualified(self, table: str) -> str:
+        """Return a fully-qualified, bracketed table reference."""
+        return f"[{self.schema}].[{table}]"
 
     # ------------------------------------------------------------------
     # Schema
@@ -434,15 +469,25 @@ class SnowflakeGenerator:
 
     def _create_schema(self) -> None:
         cur = self.conn.cursor()
+        cur.execute(f"""
+            IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'{self.schema}')
+            BEGIN
+                EXEC(N'CREATE SCHEMA [{self.schema}]')
+            END
+        """)
+        self.conn.commit()
         for orig, columns in self._schema.items():
             safe = self._table_map[orig]
             col_defs = ",\n            ".join(
-                f'"{col}" {_sf_to_sqlite(typ)}' for col, typ in columns
+                f"[{col}] {_sf_to_sqlserver(typ)}" for col, typ in columns
             )
             ddl = f"""
-            CREATE TABLE IF NOT EXISTS "{safe}" (
-                {col_defs}
-            )
+            IF OBJECT_ID(N'{self.schema}.{safe}', N'U') IS NULL
+            BEGIN
+                CREATE TABLE {self._qualified(safe)} (
+                    {col_defs}
+                )
+            END
             """
             cur.execute(ddl)
         self.conn.commit()
@@ -453,14 +498,14 @@ class SnowflakeGenerator:
 
     def seed(self) -> None:
         """Insert *n* rows into every table. Safe to call multiple times."""
-        cur  = self.conn.cursor()
-        n    = self.n
+        cur    = self.conn.cursor()
+        n      = self.n
         totals: dict[str, int] = {}
 
         for orig, columns in self._schema.items():
-            safe = self._table_map[orig]
+            safe         = self._table_map[orig]
             placeholders = ", ".join(["?"] * len(columns))
-            stmt = f'INSERT OR IGNORE INTO "{safe}" VALUES ({placeholders})'
+            stmt = f"INSERT INTO {self._qualified(safe)} VALUES ({placeholders})"
 
             rows = [
                 tuple(_col_value(col, typ, i) for col, typ in columns)
@@ -474,11 +519,11 @@ class SnowflakeGenerator:
         total_rows = sum(totals.values())
         print(
             f"Seeded {len(totals)} tables × {n} rows = {total_rows} total rows "
-            f"-> {self.db_path}"
+            f"-> [{self.schema}] on SQL Server"
         )
         if len(self._table_map) <= 30:
             for orig, safe in self._table_map.items():
-                print(f"  {orig!s:40s} -> {safe}")
+                print(f"  {orig!s:40s} -> {self._qualified(safe)}")
 
     # ------------------------------------------------------------------
     # Teardown
@@ -488,12 +533,12 @@ class SnowflakeGenerator:
         self.conn.close()
 
     # ------------------------------------------------------------------
-    # Convenience: return table name map
+    # Convenience
     # ------------------------------------------------------------------
 
     @property
     def table_map(self) -> dict[str, str]:
-        """Mapping of original Snowflake object name → SQLite table name."""
+        """Mapping of original Snowflake object name → SQL Server table name."""
         return dict(self._table_map)
 
 
@@ -502,10 +547,22 @@ class SnowflakeGenerator:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    db       = Path("snowflake.db")
     csv_file = Path("snowflake_table_columns.csv")
 
-    gen = SnowflakeGenerator(db_path=str(db), csv_path=str(csv_file), n=10)
+    load_dotenv()
+
+    connstr = os.environ.get("AZURE_SQL_CONNSTR")
+    if not connstr:
+        raise EnvironmentError(
+            "AZURE_SQL_CONNSTR environment variable is not set."
+        )
+
+    gen = SnowflakeSqlServerGenerator(
+        connstr=connstr,
+        schema_csv_path=str(csv_file),
+        schema="snowflake",
+        n=50
+    )
     gen.seed()
     gen.close()
-    print(f"\nDone. Database: {db.resolve()}")
+    print("\nDone.")
